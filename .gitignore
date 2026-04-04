@@ -1,0 +1,24 @@
+# Mobile
+optik-okuyucu-mobil/node_modules/
+optik-okuyucu-mobil/.expo/
+optik-okuyucu-mobil/dist/
+optik-okuyucu-mobil/web-build/
+
+# Python
+optik-okuyucu-python/__pycache__/
+optik-okuyucu-python/*.pyc
+optik-okuyucu-python/venv/
+optik-okuyucu-python/.venv/
+
+# Generated debug images
+optik-okuyucu-python/debug_tum_okumalar.jpg
+optik-okuyucu-python/gelen_orijinal_foto.jpg
+optik-okuyucu-python/ogrenci_isim_crop.jpg
+optik-okuyucu-python/warped_gray.jpg
+optik-okuyucu-python/warped_thresh.jpg
+optik-okuyucu-python/marker_thresh.jpg
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
