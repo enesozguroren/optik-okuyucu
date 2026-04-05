@@ -2,6 +2,7 @@ from fastapi import FastAPI, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 import cv2
 import numpy as np
+import base64
 
 app = FastAPI()
 app.add_middleware(
@@ -301,6 +302,12 @@ def draw_debug(warped_color):
 
     return warped_color
 
+def image_to_base64(path: str):
+    try:
+        with open(path, "rb") as f:
+            return base64.b64encode(f.read()).decode("utf-8")
+    except:
+        return None
 
 # ============================================================================
 # API
@@ -369,6 +376,10 @@ async def upload_image(photo: UploadFile = File(...)):
         for i, c in enumerate(tum_cevaplar, 1):
             print(f"  Soru {i:2d}: {c}")
 
+        name_crop_b64 = image_to_base64("ogrenci_isim_crop.jpg")
+        debug_b64 = image_to_base64("debug_tum_okumalar.jpg")
+        warped_b64 = image_to_base64("warped_gray.jpg")
+
         return {
             "message": "Form başarıyla okundu",
             "bookletType": detected_kt,
@@ -379,7 +390,10 @@ async def upload_image(photo: UploadFile = File(...)):
             "wrong": 0,
             "blank": boslar,
             "multiMark": hatalilar,
-            "markerCount": 4
+            "markerCount": 4,
+            "nameCropBase64": name_crop_b64,
+            "debugImageBase64": debug_b64,
+            "warpedImageBase64": warped_b64
         }
 
     except Exception as e:

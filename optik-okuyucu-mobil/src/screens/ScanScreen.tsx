@@ -1,63 +1,69 @@
 import React, { useState, useRef, useEffect } from 'react';
 import {
   View, Text, TouchableOpacity, StyleSheet, Alert,
-  TextInput, Modal, ActivityIndicator, Vibration, Animated, Image,
+  TextInput, Modal, ActivityIndicator, Vibration, Animated, Image, Dimensions,
 } from 'react-native';
 import { CameraView, useCameraPermissions } from 'expo-camera';
 import { useNavigation, useRoute, RouteProp } from '@react-navigation/native';
 import { StackNavigationProp } from '@react-navigation/stack';
 import { RootStackParamList } from '../navigation/AppNavigator';
 import { useStore } from '../store/useStore';
-import { AnswerChoice } from '../types';
+import { AnswerChoice, GroupLabel } from '../types';
+import { calculateScore } from '../services/scanner';
+import * as ImageManipulator from 'expo-image-manipulator';
+import * as FileSystem from 'expo-file-system/legacy';
 
 type ScanRoute = RouteProp<RootStackParamList, 'Scan'>;
-type ScanNav   = StackNavigationProp<RootStackParamList>;
+type ScanNav = StackNavigationProp<RootStackParamList>;
 
 type ScanState = 'scanning' | 'processing' | 'result' | 'naming';
 
 interface ResultData {
-  bookletType:  AnswerChoice;   // A/B/C/D/E kitapçık türü
-  adCropUri:    string | null;  // İsim alanı görseli
-  sidCropUri:   string | null;  // Numara alanı görseli
-  studentName:  string;
-  answers:      AnswerChoice[];
-  score:        number;
-  correct:      number;
-  wrong:        number;
-  blank:        number;
+  bookletType: AnswerChoice;
+  adCropUri: string | null;
+  debugImageUri: string | null;
+  studentName: string;
+  studentNumber: string;
+  answers: AnswerChoice[];
+  score: number;
+  correct: number;
+  wrong: number;
+  blank: number;
 }
 
 const RESULT_DISPLAY_SEC = 5;
+const API_BASE_URL = 'http://192.168.1.61:3000';
+
+const { width: SCREEN_W, height: SCREEN_H } = Dimensions.get('window');
 
 export default function ScanScreen() {
-  const nav   = useNavigation<ScanNav>();
+  const nav = useNavigation<ScanNav>();
   const route = useRoute<ScanRoute>();
   const { quizId } = route.params;
 
-  const { activeQuiz, saveResult } = useStore();
+  const { activeQuiz, saveResult, findStudentByNumber } = useStore();
   const [permission, requestPermission] = useCameraPermissions();
   const cameraRef = useRef<CameraView>(null);
 
-  const [state,       setState]       = useState<ScanState>('scanning');
-  const [result,      setResult]      = useState<ResultData | null>(null);
-  const [countdown,   setCountdown]   = useState(RESULT_DISPLAY_SEC);
-  const [manualName,  setManualName]  = useState('');
+  const [state, setState] = useState<ScanState>('scanning');
+  const [result, setResult] = useState<ResultData | null>(null);
+  const [countdown, setCountdown] = useState(RESULT_DISPLAY_SEC);
+  const [manualName, setManualName] = useState('');
   const [autoCapture, setAutoCapture] = useState(false);
+  const [showDebug, setShowDebug] = useState(false);
 
-  const progressAnim  = useRef(new Animated.Value(1)).current;
-  const countdownRef  = useRef<ReturnType<typeof setInterval> | null>(null);
+  const progressAnim = useRef(new Animated.Value(1)).current;
+  const countdownRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const processingRef = useRef(false);
 
-  // Otomatik çekim
   useEffect(() => {
     if (state !== 'scanning' || !autoCapture) return;
     const interval = setInterval(() => {
       if (!processingRef.current) handleCapture();
-    }, 1500);
+    }, 1800);
     return () => clearInterval(interval);
   }, [state, autoCapture]);
 
-  // Sonuç geri sayımı
   useEffect(() => {
     if (state !== 'result') return;
 
@@ -81,10 +87,14 @@ export default function ScanScreen() {
       });
     }, 1000);
 
-    return () => { if (countdownRef.current) clearInterval(countdownRef.current); };
-  }, [state, result]);
+    return () => {
+      if (countdownRef.current) clearInterval(countdownRef.current);
+    };
+  }, [state]);
 
-  if (!permission) return <ActivityIndicator style={{ flex: 1 }} color="#4472C4" />;
+  if (!permission) {
+    return <ActivityIndicator style={{ flex: 1 }} color="#4472C4" />;
+  }
 
   if (!permission.granted) {
     return (
@@ -105,30 +115,81 @@ export default function ScanScreen() {
     );
   }
 
+  async function base64ToFile(base64: string, prefix: string) {
+    const uri = `${FileSystem.cacheDirectory}${prefix}_${Date.now()}.jpg`;
+    await FileSystem.writeAsStringAsync(uri, base64, {
+      encoding: FileSystem.EncodingType.Base64,
+    });
+    return uri;
+  }
+
+  async function cropToGuideArea(photoUri: string) {
+    const guideWidth = SCREEN_W * 0.9;
+    const guideHeight = guideWidth * 1.414;
+
+    const leftRatio = (SCREEN_W - guideWidth) / 2 / SCREEN_W;
+    const topVisual = (SCREEN_H - guideHeight) / 2 / SCREEN_H;
+
+    const img = await ImageManipulator.manipulateAsync(
+      photoUri,
+      [],
+      { format: ImageManipulator.SaveFormat.JPEG }
+    );
+
+    const cropX = Math.round(img.width * leftRatio);
+    const cropY = Math.round(img.height * Math.max(0.08, topVisual * 0.75));
+    const cropW = Math.round(img.width * 0.9);
+    const cropH = Math.round(cropW * 1.414);
+
+    const safeCropX = Math.max(0, Math.min(cropX, img.width - 1));
+    const safeCropY = Math.max(0, Math.min(cropY, img.height - 1));
+    const safeCropW = Math.min(cropW, img.width - safeCropX);
+    const safeCropH = Math.min(cropH, img.height - safeCropY);
+
+    const cropped = await ImageManipulator.manipulateAsync(
+      photoUri,
+      [
+        {
+          crop: {
+            originX: safeCropX,
+            originY: safeCropY,
+            width: safeCropW,
+            height: safeCropH,
+          },
+        },
+      ],
+      { format: ImageManipulator.SaveFormat.JPEG, compress: 0.95 }
+    );
+
+    return cropped.uri;
+  }
+
   async function handleCapture() {
-    if (processingRef.current || !cameraRef.current) return;
+    if (processingRef.current || !cameraRef.current || !activeQuiz) return;
+
     processingRef.current = true;
     setState('processing');
 
     try {
-      // 1. Fotoğrafı Çek ve Titreşim Ver
-      const photo = await cameraRef.current.takePictureAsync({ quality: 0.8 });
+      const photo = await cameraRef.current.takePictureAsync({
+        quality: 0.9,
+        skipProcessing: false,
+      });
+
       if (!photo) throw new Error('Fotoğraf çekilemedi');
+
       Vibration.vibrate(50);
 
-      // 2. Fotoğrafı Python Sunucusuna Göndermek İçin Hazırla
+      const croppedUri = await cropToGuideArea(photo.uri);
+
       const formData = new FormData();
       formData.append('photo', {
-        uri: photo.uri,
+        uri: croppedUri,
         name: 'optik_form.jpg',
         type: 'image/jpeg',
       } as any);
 
-      // Kendi bilgisayarının IPv4 Adresi (Burayı güncelledik)
-      const BACKEND_URL = 'http://192.168.137.1:3000/upload';
-
-      // 3. Python'a İsteği At
-      const response = await fetch(BACKEND_URL, {
+      const response = await fetch(`${API_BASE_URL}/upload`, {
         method: 'POST',
         body: formData,
         headers: {
@@ -142,26 +203,57 @@ export default function ScanScreen() {
         throw new Error(data.error || 'Sunucu hatası');
       }
 
-      // data.bookletType artık Python'dan geliyor
+      const bookletType = (data.bookletType || 'A') as GroupLabel;
+      const answers = Array.isArray(data.answers)
+        ? data.answers.map((a: any) => {
+            if (['A', 'B', 'C', 'D', 'E'].includes(a)) return a as AnswerChoice;
+            return null;
+          })
+        : [];
+
+      const answerKey =
+        activeQuiz.groupCount > 1 && bookletType && activeQuiz.answerKeys[bookletType]
+          ? activeQuiz.answerKeys[bookletType]
+          : activeQuiz.answerKeys.A;
+
+      const scoreResult = calculateScore(
+        answers,
+        answerKey,
+        activeQuiz.negativeMarking,
+        activeQuiz.negativeValue
+      );
+
+      const studentNumber = data.studentId ? String(data.studentId) : '';
+      const matchedStudent = studentNumber
+        ? await findStudentByNumber(studentNumber)
+        : null;
+
+      const adCropUri = data.nameCropBase64
+        ? await base64ToFile(data.nameCropBase64, 'name_crop')
+        : null;
+
+      const debugImageUri = data.debugImageBase64
+        ? await base64ToFile(data.debugImageBase64, 'debug_crop')
+        : null;
+
       const r: ResultData = {
-      bookletType:  data.bookletType || '?', 
-      adCropUri:    null,
-      sidCropUri:   null,
-      studentName:  '',
-      answers:      [],
-      score:        data.score,
-      correct:      data.correct,
-      wrong:        data.wrong,
-      blank:        data.blank,
+        bookletType,
+        adCropUri,
+        debugImageUri,
+        studentName: matchedStudent?.name || '',
+        studentNumber,
+        answers,
+        score: scoreResult.score,
+        correct: scoreResult.correct,
+        wrong: scoreResult.wrong,
+        blank: scoreResult.blank,
       };
 
       setResult(r);
-      setManualName('');
+      setManualName(matchedStudent?.name || '');
       setState('naming');
-
     } catch (e: any) {
       console.error(e);
-      // Artık Python'dan gelen GERÇEK hatayı (Köşeler bulunamadı vs.) ekrana yazdıracak
       Alert.alert('Okuma Başarısız', e.message || 'Bilinmeyen bir hata oluştu.');
       setState('scanning');
     } finally {
@@ -170,22 +262,26 @@ export default function ScanScreen() {
   }
 
   async function handleManualSave() {
-    if (!result) return;
-    const name = manualName.trim() || '—';
+    if (!result || !activeQuiz) return;
+
+    const finalName = manualName.trim() || result.studentName || '—';
+
     await saveResult({
-      quizId:        activeQuiz!.id,
-      studentId:     null,
-      studentName:   name,
-      studentNumber: '',          
-      answers:       result.answers,
-      score:         result.score,
-      correct:       result.correct,
-      wrong:         result.wrong,
-      blank:         result.blank,
-      scannedAt:     new Date().toISOString(),
+      quizId: activeQuiz.id,
+      studentId: null,
+      studentName: finalName,
+      studentNumber: result.studentNumber,
+      group: result.bookletType as any,
+      answers: result.answers,
+      score: result.score,
+      correct: result.correct,
+      wrong: result.wrong,
+      blank: result.blank,
+      namePhotoUri: result.adCropUri,
+      scannedAt: new Date().toISOString(),
     });
-    const updated = { ...result, studentName: name };
-    setResult(updated);
+
+    setResult({ ...result, studentName: finalName });
     Vibration.vibrate(120);
     setState('result');
   }
@@ -193,25 +289,29 @@ export default function ScanScreen() {
   function handleNextScan() {
     if (countdownRef.current) clearInterval(countdownRef.current);
     setResult(null);
+    setShowDebug(false);
     setState('scanning');
   }
 
   function handleDeleteResult() {
     if (countdownRef.current) clearInterval(countdownRef.current);
     setResult(null);
+    setShowDebug(false);
     setState('scanning');
   }
 
   const scoreColor = result
-    ? result.score >= 70 ? '#27ae60' : result.score >= 50 ? '#f39c12' : '#e74c3c'
+    ? result.score >= 70
+      ? '#27ae60'
+      : result.score >= 50
+      ? '#f39c12'
+      : '#e74c3c'
     : '#fff';
 
   return (
     <View style={styles.container}>
-      {/* Kamera her zaman arka planda */}
       <CameraView ref={cameraRef} style={StyleSheet.absoluteFill} facing="back" />
 
-      {/* İşleniyor overlay */}
       {state === 'processing' && (
         <View style={styles.processingOverlay}>
           <ActivityIndicator size="large" color="#fff" />
@@ -219,46 +319,60 @@ export default function ScanScreen() {
         </View>
       )}
 
-      {/* Tarama modu: kılavuz çerçeve */}
       {(state === 'scanning' || state === 'processing') && (
         <View style={styles.guideOverlay}>
-          <View style={styles.guide}>
-            <View style={[styles.corner, styles.tl]} />
-            <View style={[styles.corner, styles.tr]} />
-            <View style={[styles.corner, styles.bl]} />
-            <View style={[styles.corner, styles.br]} />
+          <View style={styles.guideMaskTop} />
+          <View style={styles.guideRow}>
+            <View style={styles.guideMaskSide} />
+            <View style={styles.guide}>
+              <View style={[styles.corner, styles.tl]} />
+              <View style={[styles.corner, styles.tr]} />
+              <View style={[styles.corner, styles.bl]} />
+              <View style={[styles.corner, styles.br]} />
+
+              <View style={styles.innerHeaderGuide} />
+              <View style={styles.innerIdGuide} />
+              <View style={styles.innerQuestionsGuideLeft} />
+              <View style={styles.innerQuestionsGuideMid} />
+              <View style={styles.innerQuestionsGuideRight} />
+            </View>
+            <View style={styles.guideMaskSide} />
           </View>
-          <Text style={styles.guideText}>Formu çerçeve içine hizalayın</Text>
+          <View style={styles.guideMaskBottom} />
+          <Text style={styles.guideText}>
+            Kağıdın 4 köşesi çerçevenin içinde kalsın
+          </Text>
         </View>
       )}
 
-      {/* Sonuç ekranı */}
       {state === 'result' && result && (
         <View style={styles.resultOverlay}>
-          {/* Üst progress bar */}
           <View style={styles.progressBg}>
             <Animated.View
-              style={[styles.progressBar, {
-                width: progressAnim.interpolate({ inputRange: [0, 1], outputRange: ['0%', '100%'] })
-              }]}
+              style={[
+                styles.progressBar,
+                {
+                  width: progressAnim.interpolate({
+                    inputRange: [0, 1],
+                    outputRange: ['0%', '100%'],
+                  }),
+                },
+              ]}
             />
           </View>
 
           <View style={styles.resultCard}>
-            {/* Sınav adı */}
             <Text style={styles.resultQuizName}>{activeQuiz.title}</Text>
 
-            {/* Puan - büyük */}
             <Text style={[styles.resultScore, { color: scoreColor }]}>
               {result.score.toFixed(1)}
             </Text>
+
             <Text style={styles.resultScoreLabel}>
               {result.correct} / {activeQuiz.questionCount} = %{result.score.toFixed(1)}
             </Text>
 
-            {/* Öğrenci ve kitapçık bilgisi */}
             <View style={styles.resultInfoRow}>
-              {/* Kitapçık türü */}
               <View style={styles.resultInfoItem}>
                 <Text style={styles.resultInfoLabel}>Kitapçık</Text>
                 <Text style={[styles.resultInfoValue, styles.bookletBadge]}>
@@ -266,28 +380,18 @@ export default function ScanScreen() {
                 </Text>
               </View>
 
-              {/* Öğrenci adı */}
               <View style={[styles.resultInfoItem, { flex: 2 }]}>
-                <Text style={styles.resultInfoLabel}>Ad</Text>
+                <Text style={styles.resultInfoLabel}>Öğrenci</Text>
                 <Text style={styles.resultInfoValue} numberOfLines={1}>
                   {result.studentName || '—'}
                 </Text>
               </View>
             </View>
 
-            {/* Numara crop görüntüsü */}
-            {result.sidCropUri && (
-              <View style={styles.cropContainer}>
-                <Text style={styles.cropLabel}>Numara</Text>
-                <Image
-                  source={{ uri: result.sidCropUri }}
-                  style={styles.cropImage}
-                  resizeMode="contain"
-                />
-              </View>
+            {!!result.studentNumber && (
+              <Text style={styles.studentNumberText}>Numara: {result.studentNumber}</Text>
             )}
 
-            {/* İsim crop görüntüsü */}
             {result.adCropUri && (
               <View style={styles.cropContainer}>
                 <Text style={styles.cropLabel}>Ad Soyad</Text>
@@ -299,7 +403,17 @@ export default function ScanScreen() {
               </View>
             )}
 
-            {/* D / Y / B */}
+            {showDebug && result.debugImageUri && (
+              <View style={styles.cropContainer}>
+                <Text style={styles.cropLabel}>Python Debug</Text>
+                <Image
+                  source={{ uri: result.debugImageUri }}
+                  style={{ width: '100%', height: 180, borderRadius: 8 }}
+                  resizeMode="contain"
+                />
+              </View>
+            )}
+
             <View style={styles.dybRow}>
               <View style={[styles.dybItem, { backgroundColor: '#e8f8ef' }]}>
                 <Text style={[styles.dybNum, { color: '#27ae60' }]}>{result.correct}</Text>
@@ -315,11 +429,22 @@ export default function ScanScreen() {
               </View>
             </View>
 
-            {/* Aksiyonlar */}
             <View style={styles.resultActions}>
               <TouchableOpacity style={styles.deleteResultBtn} onPress={handleDeleteResult}>
                 <Text style={styles.deleteResultText}>Sil</Text>
               </TouchableOpacity>
+
+              {result.debugImageUri && (
+                <TouchableOpacity
+                  style={styles.debugBtn}
+                  onPress={() => setShowDebug(prev => !prev)}
+                >
+                  <Text style={styles.debugBtnText}>
+                    {showDebug ? 'Debug Gizle' : 'Debug Göster'}
+                  </Text>
+                </TouchableOpacity>
+              )}
+
               <TouchableOpacity style={styles.nextBtn} onPress={handleNextScan}>
                 <Text style={styles.nextBtnText}>Sonraki ({countdown})</Text>
               </TouchableOpacity>
@@ -328,7 +453,6 @@ export default function ScanScreen() {
         </View>
       )}
 
-      {/* İsim girme modal */}
       <Modal visible={state === 'naming'} transparent animationType="slide">
         <View style={styles.modalOverlay}>
           <View style={styles.modal}>
@@ -336,29 +460,17 @@ export default function ScanScreen() {
 
             {result && (
               <>
-                {/* Kitapçık türü badge */}
                 <View style={styles.modalInfoRow}>
                   <Text style={styles.modalInfoLabel}>Kitapçık Türü:</Text>
                   <View style={styles.modalBookletBadge}>
-                    <Text style={styles.modalBookletText}>
-                      {result.bookletType ?? '?'}
-                    </Text>
+                    <Text style={styles.modalBookletText}>{result.bookletType ?? '?'}</Text>
                   </View>
                 </View>
 
-                {/* Numara crop */}
-                {result.sidCropUri && (
-                  <View style={styles.modalCropContainer}>
-                    <Text style={styles.modalInfoLabel}>Numara:</Text>
-                    <Image
-                      source={{ uri: result.sidCropUri }}
-                      style={styles.modalCropImage}
-                      resizeMode="contain"
-                    />
-                  </View>
+                {!!result.studentNumber && (
+                  <Text style={styles.modalSub}>Numara: {result.studentNumber}</Text>
                 )}
 
-                {/* Ad crop */}
                 {result.adCropUri && (
                   <View style={styles.modalCropContainer}>
                     <Text style={styles.modalInfoLabel}>Ad Soyad:</Text>
@@ -371,8 +483,7 @@ export default function ScanScreen() {
                 )}
 
                 <Text style={styles.modalSub}>
-                  Puan: {result.score.toFixed(1)}{'   '}
-                  D:{result.correct} Y:{result.wrong} B:{result.blank}
+                  Puan: {result.score.toFixed(1)}   D:{result.correct} Y:{result.wrong} B:{result.blank}
                 </Text>
               </>
             )}
@@ -386,13 +497,18 @@ export default function ScanScreen() {
               returnKeyType="done"
               onSubmitEditing={handleManualSave}
             />
+
             <View style={styles.modalBtns}>
               <TouchableOpacity
                 style={styles.cancelBtn}
-                onPress={() => { setState('scanning'); setResult(null); }}
+                onPress={() => {
+                  setState('scanning');
+                  setResult(null);
+                }}
               >
                 <Text style={styles.cancelText}>İptal</Text>
               </TouchableOpacity>
+
               <TouchableOpacity style={styles.confirmBtn} onPress={handleManualSave}>
                 <Text style={styles.confirmText}>Kaydet</Text>
               </TouchableOpacity>
@@ -401,17 +517,12 @@ export default function ScanScreen() {
         </View>
       </Modal>
 
-      {/* Alt kontrol barı */}
       <View style={styles.bottomBar}>
-        <TouchableOpacity
-          style={styles.navBtn}
-          onPress={() => nav.navigate('Results', { quizId })}
-        >
+        <TouchableOpacity style={styles.navBtn} onPress={() => nav.navigate('Results', { quizId })}>
           <Text style={styles.navBtnText}>📊</Text>
           <Text style={styles.navBtnLabel}>Sonuçlar</Text>
         </TouchableOpacity>
 
-        {/* Büyük çekim butonu */}
         <TouchableOpacity
           style={[styles.captureBtn, state !== 'scanning' && styles.captureBtnDisabled]}
           onPress={handleCapture}
@@ -422,10 +533,9 @@ export default function ScanScreen() {
             : <View style={styles.captureInner} />}
         </TouchableOpacity>
 
-        {/* Otomatik mod toggle */}
         <TouchableOpacity
           style={[styles.navBtn, autoCapture && styles.navBtnActive]}
-          onPress={() => setAutoCapture(p => !p)}
+          onPress={() => setAutoCapture(prev => !prev)}
         >
           <Text style={styles.navBtnText}>⚡</Text>
           <Text style={styles.navBtnLabel}>{autoCapture ? 'Oto: Açık' : 'Oto: Kapalı'}</Text>
@@ -436,50 +546,110 @@ export default function ScanScreen() {
 }
 
 const CORNER_SIZE = 28;
-const BORDER_W    = 3;
+const BORDER_W = 3;
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#000' },
-  center:    { flex: 1, justifyContent: 'center', alignItems: 'center', gap: 16 },
-  permText:  { fontSize: 16, color: '#333' },
-  permBtn:   { backgroundColor: '#4472C4', borderRadius: 10, paddingHorizontal: 24, paddingVertical: 12 },
+  center: { flex: 1, justifyContent: 'center', alignItems: 'center', gap: 16 },
+  permText: { fontSize: 16, color: '#333' },
+  permBtn: { backgroundColor: '#4472C4', borderRadius: 10, paddingHorizontal: 24, paddingVertical: 12 },
   permBtnText: { color: '#fff', fontWeight: '600' },
 
   processingOverlay: {
     ...StyleSheet.absoluteFillObject,
     backgroundColor: 'rgba(0,0,0,0.55)',
-    justifyContent: 'center', alignItems: 'center', gap: 12,
+    justifyContent: 'center',
+    alignItems: 'center',
+    gap: 12,
   },
   processingText: { color: '#fff', fontSize: 16, fontWeight: '600' },
 
   guideOverlay: {
     ...StyleSheet.absoluteFillObject,
-    justifyContent: 'center', alignItems: 'center',
-    paddingBottom: 80, // Alt menüye çarpmaması için
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingBottom: 80,
   },
-  // Kılavuz kutusu: Formun tam oturması gereken alan
-  guide: { 
-    width: '90%', // Ekran genişliğinin %90'ı
-    aspectRatio: 1 / 1.414, // A4 kağıt oranı (Yaklaşık 1.41)
+  guideMaskTop: { flex: 1, width: '100%', backgroundColor: 'rgba(0,0,0,0.45)' },
+  guideMaskBottom: { flex: 1, width: '100%', backgroundColor: 'rgba(0,0,0,0.45)' },
+  guideRow: { flexDirection: 'row', alignItems: 'center' },
+  guideMaskSide: {
+    width: SCREEN_W * 0.05,
+    height: SCREEN_W * 0.9 * 1.414,
+    backgroundColor: 'rgba(0,0,0,0.45)',
+  },
+  guide: {
+    width: SCREEN_W * 0.9,
+    height: SCREEN_W * 0.9 * 1.414,
     position: 'relative',
-    backgroundColor: 'rgba(255,255,255,0.05)', // Hafif şeffaf iç arka plan
+    backgroundColor: 'rgba(255,255,255,0.04)',
   },
-
-  corner:   { position: 'absolute', width: CORNER_SIZE, height: CORNER_SIZE },
+  corner: { position: 'absolute', width: CORNER_SIZE, height: CORNER_SIZE },
   tl: { top: 0, left: 0, borderTopWidth: BORDER_W, borderLeftWidth: BORDER_W, borderColor: '#fff' },
   tr: { top: 0, right: 0, borderTopWidth: BORDER_W, borderRightWidth: BORDER_W, borderColor: '#fff' },
   bl: { bottom: 0, left: 0, borderBottomWidth: BORDER_W, borderLeftWidth: BORDER_W, borderColor: '#fff' },
   br: { bottom: 0, right: 0, borderBottomWidth: BORDER_W, borderRightWidth: BORDER_W, borderColor: '#fff' },
-  guideText: { color: '#fff', marginTop: 14, fontSize: 13, opacity: 0.85, textAlign: 'center' },
 
-  // Sonuç overlay
+  innerHeaderGuide: {
+    position: 'absolute',
+    top: '3%',
+    left: '18%',
+    width: '42%',
+    height: '4%',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.45)',
+  },
+  innerIdGuide: {
+    position: 'absolute',
+    top: '17%',
+    left: '17%',
+    width: '18%',
+    height: '20%',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.35)',
+  },
+  innerQuestionsGuideLeft: {
+    position: 'absolute',
+    top: '56%',
+    left: '17%',
+    width: '18%',
+    height: '34%',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.25)',
+  },
+  innerQuestionsGuideMid: {
+    position: 'absolute',
+    top: '17%',
+    left: '43%',
+    width: '18%',
+    height: '73%',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.25)',
+  },
+  innerQuestionsGuideRight: {
+    position: 'absolute',
+    top: '17%',
+    left: '69%',
+    width: '18%',
+    height: '73%',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.25)',
+  },
+  guideText: {
+    color: '#fff',
+    marginTop: 14,
+    fontSize: 13,
+    opacity: 0.85,
+    textAlign: 'center',
+  },
+
   resultOverlay: {
     ...StyleSheet.absoluteFillObject,
     backgroundColor: 'rgba(0,0,0,0.75)',
     justifyContent: 'center',
     paddingHorizontal: 16,
   },
-  progressBg:  { height: 4, backgroundColor: 'rgba(255,255,255,0.2)', borderRadius: 2, marginBottom: 16 },
+  progressBg: { height: 4, backgroundColor: 'rgba(255,255,255,0.2)', borderRadius: 2, marginBottom: 16 },
   progressBar: { height: 4, backgroundColor: '#4472C4', borderRadius: 2 },
 
   resultCard: {
@@ -487,21 +657,22 @@ const styles = StyleSheet.create({
     borderRadius: 16,
     padding: 20,
   },
-  resultQuizName:   { fontSize: 13, color: '#888', marginBottom: 4, textAlign: 'center' },
-  resultScore:      { fontSize: 56, fontWeight: '700', textAlign: 'center', lineHeight: 64 },
+  resultQuizName: { fontSize: 13, color: '#888', marginBottom: 4, textAlign: 'center' },
+  resultScore: { fontSize: 56, fontWeight: '700', textAlign: 'center', lineHeight: 64 },
   resultScoreLabel: { fontSize: 14, color: '#555', textAlign: 'center', marginBottom: 16 },
-
-  resultInfoRow:  { flexDirection: 'row', gap: 12, marginBottom: 12 },
+  resultInfoRow: { flexDirection: 'row', gap: 12, marginBottom: 12 },
   resultInfoItem: {
-    flex: 1, backgroundColor: '#f8f9ff', borderRadius: 8, padding: 10, alignItems: 'center',
+    flex: 1,
+    backgroundColor: '#f8f9ff',
+    borderRadius: 8,
+    padding: 10,
+    alignItems: 'center',
   },
   resultInfoLabel: { fontSize: 11, color: '#888', marginBottom: 2 },
   resultInfoValue: { fontSize: 14, fontWeight: '600', color: '#1a1a1a' },
-  bookletBadge:    {
-    fontSize: 18, fontWeight: '800', color: '#4472C4',
-  },
+  bookletBadge: { fontSize: 18, fontWeight: '800', color: '#4472C4' },
+  studentNumberText: { textAlign: 'center', color: '#666', marginBottom: 8 },
 
-  // Crop görselleri
   cropContainer: {
     marginBottom: 8,
     backgroundColor: '#f8f9ff',
@@ -511,67 +682,93 @@ const styles = StyleSheet.create({
   cropLabel: { fontSize: 10, color: '#888', marginBottom: 3 },
   cropImage: { width: '100%', height: 28, borderRadius: 4 },
 
-  dybRow:   { flexDirection: 'row', gap: 8, marginBottom: 16, marginTop: 4 },
-  dybItem:  { flex: 1, borderRadius: 8, paddingVertical: 10, alignItems: 'center' },
-  dybNum:   { fontSize: 22, fontWeight: '700' },
+  dybRow: { flexDirection: 'row', gap: 8, marginBottom: 16, marginTop: 4 },
+  dybItem: { flex: 1, borderRadius: 8, paddingVertical: 10, alignItems: 'center' },
+  dybNum: { fontSize: 22, fontWeight: '700' },
   dybLabel: { fontSize: 11, color: '#555', marginTop: 2 },
 
-  resultActions:    { flexDirection: 'row', gap: 10 },
-  deleteResultBtn:  {
-    paddingVertical: 12, paddingHorizontal: 18,
-    borderRadius: 8, borderWidth: 1, borderColor: '#e74c3c', alignItems: 'center',
+  resultActions: { flexDirection: 'row', gap: 10, alignItems: 'center' },
+  deleteResultBtn: {
+    paddingVertical: 12,
+    paddingHorizontal: 18,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#e74c3c',
+    alignItems: 'center',
   },
   deleteResultText: { color: '#e74c3c', fontWeight: '600' },
-  nextBtn:          {
-    flex: 1, backgroundColor: '#4472C4', borderRadius: 8,
-    paddingVertical: 12, alignItems: 'center',
+  debugBtn: {
+    paddingVertical: 12,
+    paddingHorizontal: 14,
+    borderRadius: 8,
+    backgroundColor: '#eef2ff',
+  },
+  debugBtnText: { color: '#4472C4', fontWeight: '600' },
+  nextBtn: {
+    flex: 1,
+    backgroundColor: '#4472C4',
+    borderRadius: 8,
+    paddingVertical: 12,
+    alignItems: 'center',
   },
   nextBtnText: { color: '#fff', fontWeight: '700', fontSize: 15 },
 
-  // Alt bar
   bottomBar: {
-    position: 'absolute', bottom: 0, left: 0, right: 0,
+    position: 'absolute',
+    bottom: 0,
+    left: 0,
+    right: 0,
     backgroundColor: 'rgba(0,0,0,0.85)',
-    paddingVertical: 16, paddingHorizontal: 24,
-    flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center',
+    paddingVertical: 16,
+    paddingHorizontal: 24,
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
     paddingBottom: 32,
   },
   navBtn: {
-    alignItems: 'center', gap: 4,
+    alignItems: 'center',
+    gap: 4,
     backgroundColor: 'rgba(255,255,255,0.1)',
-    borderRadius: 10, paddingHorizontal: 14, paddingVertical: 8,
+    borderRadius: 10,
+    paddingHorizontal: 14,
+    paddingVertical: 8,
   },
   navBtnActive: { backgroundColor: 'rgba(255,200,0,0.3)' },
-  navBtnText:   { fontSize: 20 },
-  navBtnLabel:  { fontSize: 10, color: '#ccc' },
+  navBtnText: { fontSize: 20 },
+  navBtnLabel: { fontSize: 10, color: '#ccc' },
 
   captureBtn: {
-    width: 72, height: 72, borderRadius: 36,
+    width: 72,
+    height: 72,
+    borderRadius: 36,
     backgroundColor: '#4472C4',
-    justifyContent: 'center', alignItems: 'center',
-    borderWidth: 4, borderColor: '#fff',
+    justifyContent: 'center',
+    alignItems: 'center',
+    borderWidth: 4,
+    borderColor: '#fff',
   },
   captureBtnDisabled: { opacity: 0.4 },
   captureInner: { width: 50, height: 50, borderRadius: 25, backgroundColor: '#fff' },
 
-  // Modal
   modalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'flex-end' },
   modal: {
     backgroundColor: '#fff',
-    borderTopLeftRadius: 20, borderTopRightRadius: 20,
+    borderTopLeftRadius: 20,
+    borderTopRightRadius: 20,
     padding: 24,
   },
   modalTitle: { fontSize: 18, fontWeight: '700', color: '#1a1a1a', marginBottom: 12 },
-  modalSub:   { fontSize: 13, color: '#555', marginBottom: 12 },
-
+  modalSub: { fontSize: 13, color: '#555', marginBottom: 12 },
   modalInfoRow: { flexDirection: 'row', alignItems: 'center', gap: 10, marginBottom: 10 },
   modalInfoLabel: { fontSize: 12, color: '#888', fontWeight: '600' },
   modalBookletBadge: {
-    backgroundColor: '#EEF2FF', borderRadius: 6,
-    paddingHorizontal: 12, paddingVertical: 4,
+    backgroundColor: '#EEF2FF',
+    borderRadius: 6,
+    paddingHorizontal: 12,
+    paddingVertical: 4,
   },
   modalBookletText: { fontSize: 18, fontWeight: '800', color: '#4472C4' },
-
   modalCropContainer: {
     marginBottom: 10,
     backgroundColor: '#f8f9ff',
@@ -581,16 +778,31 @@ const styles = StyleSheet.create({
   modalCropImage: { width: '100%', height: 40, borderRadius: 4 },
 
   input: {
-    borderWidth: 1, borderColor: '#e0e0e0', borderRadius: 8,
-    paddingHorizontal: 12, paddingVertical: 11, fontSize: 15,
-    marginBottom: 12, color: '#1a1a1a',
+    borderWidth: 1,
+    borderColor: '#e0e0e0',
+    borderRadius: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 11,
+    fontSize: 15,
+    marginBottom: 12,
+    color: '#1a1a1a',
   },
-  modalBtns:  { flexDirection: 'row', gap: 12 },
-  cancelBtn:  {
-    flex: 1, borderRadius: 8, borderWidth: 1, borderColor: '#ccc',
-    paddingVertical: 12, alignItems: 'center',
+  modalBtns: { flexDirection: 'row', gap: 12 },
+  cancelBtn: {
+    flex: 1,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#ccc',
+    paddingVertical: 12,
+    alignItems: 'center',
   },
   cancelText: { color: '#555', fontWeight: '600' },
-  confirmBtn: { flex: 1, borderRadius: 8, backgroundColor: '#4472C4', paddingVertical: 12, alignItems: 'center' },
+  confirmBtn: {
+    flex: 1,
+    borderRadius: 8,
+    backgroundColor: '#4472C4',
+    paddingVertical: 12,
+    alignItems: 'center',
+  },
   confirmText: { color: '#fff', fontWeight: '600' },
 });

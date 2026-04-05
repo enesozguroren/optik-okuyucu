@@ -1,23 +1,17 @@
 import { create } from 'zustand';
-import { Quiz, SchoolClass, Student, ScanResult } from '../types';
+import { Quiz, SchoolClass, Student, ScanResult, AnswerChoice, GroupLabel } from '../types';
 import * as DB from '../services/database';
 
 interface AppState {
-  // ─── Veri ────────────────────────────────────────────────────────────────
   quizzes: Quiz[];
   classes: SchoolClass[];
   students: Student[];
   results: ScanResult[];
-
-  // ─── Aktif seçimler ───────────────────────────────────────────────────────
   activeQuiz: Quiz | null;
   activeClass: SchoolClass | null;
-
-  // ─── UI durumu ────────────────────────────────────────────────────────────
   isLoading: boolean;
   error: string | null;
 
-  // ─── Aksiyonlar ───────────────────────────────────────────────────────────
   loadQuizzes: () => Promise<void>;
   loadClasses: () => Promise<void>;
   loadStudents: (classId: number) => Promise<void>;
@@ -29,10 +23,11 @@ interface AppState {
   addQuiz: (
     title: string,
     questionCount: number,
-    answerKey: import('../types').AnswerChoice[],
+    answerKeys: Record<GroupLabel, AnswerChoice[]>,
+    groupCount: number,
     negativeMarking: boolean,
     negativeValue: number
-  ) => Promise<void>;
+  ) => Promise<number>;
 
   addClass: (name: string, grade: string) => Promise<void>;
   addStudent: (classId: number, name: string, studentNumber: string) => Promise<void>;
@@ -42,6 +37,8 @@ interface AppState {
   deleteClass: (id: number) => Promise<void>;
   deleteStudent: (id: number) => Promise<void>;
   deleteResult: (id: number) => Promise<void>;
+
+  findStudentByNumber: (studentNumber: string) => Promise<Student | null>;
 
   clearError: () => void;
 }
@@ -56,7 +53,6 @@ export const useStore = create<AppState>((set, get) => ({
   isLoading: false,
   error: null,
 
-  // ─── Load ──────────────────────────────────────────────────────────────────
   loadQuizzes: async () => {
     try {
       set({ isLoading: true });
@@ -77,7 +73,7 @@ export const useStore = create<AppState>((set, get) => ({
     }
   },
 
-  loadStudents: async (classId: number) => {
+  loadStudents: async (classId) => {
     try {
       set({ isLoading: true });
       const students = await DB.getStudentsByClass(classId);
@@ -87,7 +83,7 @@ export const useStore = create<AppState>((set, get) => ({
     }
   },
 
-  loadResults: async (quizId: number) => {
+  loadResults: async (quizId) => {
     try {
       set({ isLoading: true });
       const results = await DB.getResultsByQuiz(quizId);
@@ -97,17 +93,24 @@ export const useStore = create<AppState>((set, get) => ({
     }
   },
 
-  // ─── Setters ───────────────────────────────────────────────────────────────
   setActiveQuiz: (quiz) => set({ activeQuiz: quiz }),
   setActiveClass: (cls) => set({ activeClass: cls }),
 
-  // ─── Create ────────────────────────────────────────────────────────────────
-  addQuiz: async (title, questionCount, answerKey, negativeMarking, negativeValue) => {
+  addQuiz: async (title, questionCount, answerKeys, groupCount, negativeMarking, negativeValue) => {
     try {
-      await DB.createQuiz(title, questionCount, answerKey, negativeMarking, negativeValue);
+      const quizId = await DB.createQuiz(
+        title,
+        questionCount,
+        answerKeys,
+        groupCount,
+        negativeMarking,
+        negativeValue
+      );
       await get().loadQuizzes();
+      return quizId;
     } catch (e: any) {
       set({ error: e.message });
+      throw e;
     }
   },
 
@@ -117,6 +120,7 @@ export const useStore = create<AppState>((set, get) => ({
       await get().loadClasses();
     } catch (e: any) {
       set({ error: e.message });
+      throw e;
     }
   },
 
@@ -126,6 +130,7 @@ export const useStore = create<AppState>((set, get) => ({
       await get().loadStudents(classId);
     } catch (e: any) {
       set({ error: e.message });
+      throw e;
     }
   },
 
@@ -135,16 +140,17 @@ export const useStore = create<AppState>((set, get) => ({
       await get().loadResults(result.quizId);
     } catch (e: any) {
       set({ error: e.message });
+      throw e;
     }
   },
 
-  // ─── Delete ────────────────────────────────────────────────────────────────
   deleteQuiz: async (id) => {
     try {
       await DB.deleteQuiz(id);
       await get().loadQuizzes();
     } catch (e: any) {
       set({ error: e.message });
+      throw e;
     }
   },
 
@@ -154,6 +160,7 @@ export const useStore = create<AppState>((set, get) => ({
       await get().loadClasses();
     } catch (e: any) {
       set({ error: e.message });
+      throw e;
     }
   },
 
@@ -161,9 +168,12 @@ export const useStore = create<AppState>((set, get) => ({
     try {
       await DB.deleteStudent(id);
       const { activeClass } = get();
-      if (activeClass) await get().loadStudents(activeClass.id);
+      if (activeClass) {
+        await get().loadStudents(activeClass.id);
+      }
     } catch (e: any) {
       set({ error: e.message });
+      throw e;
     }
   },
 
@@ -171,11 +181,23 @@ export const useStore = create<AppState>((set, get) => ({
     try {
       await DB.deleteResult(id);
       const { activeQuiz } = get();
-      if (activeQuiz) await get().loadResults(activeQuiz.id);
+      if (activeQuiz) {
+        await get().loadResults(activeQuiz.id);
+      }
     } catch (e: any) {
       set({ error: e.message });
+      throw e;
     }
   },
+
+  findStudentByNumber: async (studentNumber) => {
+  try {
+    return await DB.findStudentByNumber(studentNumber);
+  } catch (e: any) {
+    set({ error: e.message });
+    return null;
+  }
+},
 
   clearError: () => set({ error: null }),
 }));
