@@ -50,6 +50,16 @@ export default function ScanScreen() {
   const [manualName, setManualName] = useState('');
   const [autoCapture, setAutoCapture] = useState(false);
 
+  type LayoutBox = {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+};
+
+const [previewLayout, setPreviewLayout] = useState<LayoutBox | null>(null);
+const [guideLayout, setGuideLayout] = useState<LayoutBox | null>(null);
+
   const progressAnim = useRef(new Animated.Value(1)).current;
   const countdownRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const processingRef = useRef(false);
@@ -126,45 +136,68 @@ export default function ScanScreen() {
   }
 
   async function cropToGuideArea(photoUri: string) {
-    const guideWidth = SCREEN_W * 0.9;
-    const guideHeight = guideWidth * 1.414;
+  const img = await ImageManipulator.manipulateAsync(
+    photoUri,
+    [],
+    { format: ImageManipulator.SaveFormat.JPEG }
+  );
 
-    const leftRatio = (SCREEN_W - guideWidth) / 2 / SCREEN_W;
-    const topVisual = (SCREEN_H - guideHeight) / 2 / SCREEN_H;
-
-    const img = await ImageManipulator.manipulateAsync(
-      photoUri,
-      [],
-      { format: ImageManipulator.SaveFormat.JPEG }
-    );
-
-    const cropX = Math.round(img.width * leftRatio);
-    const cropY = Math.round(img.height * Math.max(0.08, topVisual * 0.75));
-    const cropW = Math.round(img.width * 0.9);
-    const cropH = Math.round(cropW * 1.414);
-
-    const safeCropX = Math.max(0, Math.min(cropX, img.width - 1));
-    const safeCropY = Math.max(0, Math.min(cropY, img.height - 1));
-    const safeCropW = Math.min(cropW, img.width - safeCropX);
-    const safeCropH = Math.min(cropH, img.height - safeCropY);
-
-    const cropped = await ImageManipulator.manipulateAsync(
-      photoUri,
-      [
-        {
-          crop: {
-            originX: safeCropX,
-            originY: safeCropY,
-            width: safeCropW,
-            height: safeCropH,
-          },
-        },
-      ],
-      { format: ImageManipulator.SaveFormat.JPEG, compress: 0.95 }
-    );
-
-    return cropped.uri;
+  if (!guideLayout || !previewLayout) {
+    return photoUri;
   }
+
+  // Kamera preview, ekranda "cover" gibi davranıyor.
+  // Bu yüzden gerçek fotoğraf ile preview arasında scale + offset hesaplıyoruz.
+  const scale = Math.max(
+    previewLayout.width / img.width,
+    previewLayout.height / img.height
+  );
+
+  const displayedW = img.width * scale;
+  const displayedH = img.height * scale;
+
+  const offsetX = (displayedW - previewLayout.width) / 2;
+  const offsetY = (displayedH - previewLayout.height) / 2;
+
+  // Guide alanını biraz içeriden alıyoruz.
+  // Özellikle alttan fazla aldığı için bottom trim daha yüksek.
+  const trimLeft = guideLayout.width * 0.015;
+  const trimRight = guideLayout.width * 0.015;
+  const trimTop = guideLayout.height * 0.02;
+  const trimBottom = guideLayout.height * 0.15;
+
+  const gx = guideLayout.x + trimLeft;
+  const gy = guideLayout.y + trimTop;
+  const gw = guideLayout.width - trimLeft - trimRight;
+  const gh = guideLayout.height - trimTop - trimBottom;
+
+  const cropX = Math.round((gx + offsetX) / scale);
+  const cropY = Math.round((gy + offsetY) / scale);
+  const cropW = Math.round(gw / scale);
+  const cropH = Math.round(gh / scale);
+
+  const safeCropX = Math.max(0, Math.min(cropX, img.width - 1));
+  const safeCropY = Math.max(0, Math.min(cropY, img.height - 1));
+  const safeCropW = Math.max(1, Math.min(cropW, img.width - safeCropX));
+  const safeCropH = Math.max(1, Math.min(cropH, img.height - safeCropY));
+
+  const cropped = await ImageManipulator.manipulateAsync(
+    photoUri,
+    [
+      {
+        crop: {
+          originX: safeCropX,
+          originY: safeCropY,
+          width: safeCropW,
+          height: safeCropH,
+        },
+      },
+    ],
+    { format: ImageManipulator.SaveFormat.JPEG, compress: 0.95 }
+  );
+
+  return cropped.uri;
+}
 
   async function handleCapture() {
     if (processingRef.current || !cameraRef.current || !activeQuiz) return;
@@ -312,7 +345,13 @@ export default function ScanScreen() {
     : '#fff';
 
   return (
-    <View style={styles.container}>
+    <View
+      style={styles.container}
+      onLayout={(e) => {
+        const { x, y, width, height } = e.nativeEvent.layout;
+        setPreviewLayout({ x, y, width, height });
+      }}
+    >
       <CameraView ref={cameraRef} style={StyleSheet.absoluteFill} facing="back" />
 
       {state === 'processing' && (
@@ -327,23 +366,31 @@ export default function ScanScreen() {
           <View style={styles.guideMaskTop} />
           <View style={styles.guideRow}>
             <View style={styles.guideMaskSide} />
-            <View style={styles.guide}>
+            <View
+              style={styles.guide}
+              onLayout={(e) => {
+                const { x, y, width, height } = e.nativeEvent.layout;
+                setGuideLayout({ x, y, width, height });
+              }}
+            >
               <View style={[styles.corner, styles.tl]} />
               <View style={[styles.corner, styles.tr]} />
               <View style={[styles.corner, styles.bl]} />
               <View style={[styles.corner, styles.br]} />
 
-              <View style={styles.innerHeaderGuide} />
-              <View style={styles.innerIdGuide} />
-              <View style={styles.innerQuestionsGuideLeft} />
-              <View style={styles.innerQuestionsGuideMid} />
-              <View style={styles.innerQuestionsGuideRight} />
+              <View style={[styles.markerTarget, styles.markerTopLeft]} />
+              <View style={[styles.markerTarget, styles.markerTopRight]} />
+              <View style={[styles.markerTarget, styles.markerBottomLeft]} />
+              <View style={[styles.markerTarget, styles.markerBottomRight]} />
+
+              <View style={styles.centerGuideVertical} />
+              <View style={styles.centerGuideHorizontal} />
             </View>
             <View style={styles.guideMaskSide} />
           </View>
           <View style={styles.guideMaskBottom} />
           <Text style={styles.guideText}>
-            Kağıdın 4 köşesi çerçevenin içinde kalsın
+           Siyah referans kareleri çerçeveyle hizalayın
           </Text>
         </View>
       )}
@@ -550,12 +597,13 @@ const styles = StyleSheet.create({
   },
   processingText: { color: '#fff', fontSize: 16, fontWeight: '600' },
 
-  guideOverlay: {
-    ...StyleSheet.absoluteFillObject,
-    justifyContent: 'center',
-    alignItems: 'center',
-    paddingBottom: 80,
-  },
+guideOverlay: {
+  ...StyleSheet.absoluteFillObject,
+  justifyContent: 'center',
+  alignItems: 'center',
+  paddingBottom: 40,
+},
+
   guideMaskTop: { flex: 1, width: '100%', backgroundColor: 'rgba(0,0,0,0.45)' },
   guideMaskBottom: { flex: 1, width: '100%', backgroundColor: 'rgba(0,0,0,0.45)' },
   guideRow: { flexDirection: 'row', alignItems: 'center' },
@@ -565,69 +613,75 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(0,0,0,0.45)',
   },
   guide: {
-    width: SCREEN_W * 0.9,
-    height: SCREEN_W * 0.9 * 1.414,
+   width: SCREEN_W * 0.88,
+    height: SCREEN_W * 0.88 * 1.414,
     position: 'relative',
-    backgroundColor: 'rgba(255,255,255,0.04)',
+    backgroundColor: 'rgba(255,255,255,0.03)',
+    borderWidth: 1.5,
+    borderColor: 'rgba(255,255,255,0.45)',
+    transform: [{ translateY: -12 }],
   },
+
   corner: { position: 'absolute', width: CORNER_SIZE, height: CORNER_SIZE },
   tl: { top: 0, left: 0, borderTopWidth: BORDER_W, borderLeftWidth: BORDER_W, borderColor: '#fff' },
   tr: { top: 0, right: 0, borderTopWidth: BORDER_W, borderRightWidth: BORDER_W, borderColor: '#fff' },
   bl: { bottom: 0, left: 0, borderBottomWidth: BORDER_W, borderLeftWidth: BORDER_W, borderColor: '#fff' },
   br: { bottom: 0, right: 0, borderBottomWidth: BORDER_W, borderRightWidth: BORDER_W, borderColor: '#fff' },
 
-  innerHeaderGuide: {
-    position: 'absolute',
-    top: '3%',
-    left: '18%',
-    width: '42%',
-    height: '4%',
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.45)',
-  },
-  innerIdGuide: {
-    position: 'absolute',
-    top: '17%',
-    left: '17%',
-    width: '18%',
-    height: '20%',
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.35)',
-  },
-  innerQuestionsGuideLeft: {
-    position: 'absolute',
-    top: '56%',
-    left: '17%',
-    width: '18%',
-    height: '34%',
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.25)',
-  },
-  innerQuestionsGuideMid: {
-    position: 'absolute',
-    top: '17%',
-    left: '43%',
-    width: '18%',
-    height: '73%',
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.25)',
-  },
-  innerQuestionsGuideRight: {
-    position: 'absolute',
-    top: '17%',
-    left: '69%',
-    width: '18%',
-    height: '73%',
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.25)',
-  },
+markerTarget: {
+  position: 'absolute',
+  width: 34,
+  height: 34,
+  borderWidth: 3,
+  borderColor: 'rgba(255,255,255,0.95)',
+  backgroundColor: 'rgba(255,255,255,0.12)',
+},
+
+markerTopLeft: {
+  top: '4.5%',
+  left: '4.5%',
+},
+
+markerTopRight: {
+  top: '4.5%',
+  right: '4.5%',
+},
+
+markerBottomLeft: {
+  bottom: '4.5%',
+  left: '4.5%',
+},
+
+markerBottomRight: {
+  bottom: '4.5%',
+  right: '4.5%',
+},
+
+centerGuideVertical: {
+  position: 'absolute',
+  top: '8%',
+  bottom: '8%',
+  left: '50%',
+  width: 1,
+  backgroundColor: 'rgba(255,255,255,0.18)',
+},
+
+centerGuideHorizontal: {
+  position: 'absolute',
+  left: '8%',
+  right: '8%',
+  top: '50%',
+  height: 1,
+  backgroundColor: 'rgba(255,255,255,0.18)',
+},
   guideText: {
-    color: '#fff',
-    marginTop: 14,
-    fontSize: 13,
-    opacity: 0.85,
-    textAlign: 'center',
-  },
+  color: '#fff',
+  marginTop: 14,
+  fontSize: 13,
+  opacity: 0.92,
+  textAlign: 'center',
+  paddingHorizontal: 24,
+},
 
   resultOverlay: {
     ...StyleSheet.absoluteFillObject,
