@@ -31,7 +31,8 @@ interface ResultData {
 }
 
 const RESULT_DISPLAY_SEC = 5;
-const API_BASE_URL = 'http://192.168.137.1:3000';
+const API_BASE_URL = 'http://192.168.1.41:3000';
+const ENABLE_CROP_DEBUG = __DEV__;
 
 const { width: SCREEN_W, height: SCREEN_H } = Dimensions.get('window');
 
@@ -57,8 +58,10 @@ export default function ScanScreen() {
   height: number;
 };
 
-const [previewLayout, setPreviewLayout] = useState<LayoutBox | null>(null);
-const [guideLayout, setGuideLayout] = useState<LayoutBox | null>(null);
+  const previewRef = useRef<View>(null);
+  const guideRef = useRef<View>(null);
+  const [previewLayout, setPreviewLayout] = useState<LayoutBox | null>(null);
+  const [guideLayout, setGuideLayout] = useState<LayoutBox | null>(null);
 
   const progressAnim = useRef(new Animated.Value(1)).current;
   const countdownRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -135,7 +138,143 @@ const [guideLayout, setGuideLayout] = useState<LayoutBox | null>(null);
     return uri;
   }
 
+  function measureView(ref: React.RefObject<View | null>): Promise<LayoutBox | null> {
+    return new Promise(resolve => {
+      if (!ref.current) {
+        resolve(null);
+        return;
+      }
+
+      ref.current.measureInWindow((x, y, width, height) => {
+        if (!width || !height) {
+          resolve(null);
+          return;
+        }
+
+        resolve({ x, y, width, height });
+      });
+    });
+  }
+
+  async function syncCropLayouts() {
+    const [measuredPreview, measuredGuide] = await Promise.all([
+      measureView(previewRef),
+      measureView(guideRef),
+    ]);
+
+    const nextPreviewLayout = measuredPreview ?? previewLayout;
+    const nextGuideLayout =
+      measuredPreview && measuredGuide
+        ? {
+            x: measuredGuide.x - measuredPreview.x,
+            y: measuredGuide.y - measuredPreview.y,
+            width: measuredGuide.width,
+            height: measuredGuide.height,
+          }
+        : guideLayout;
+
+    if (measuredPreview) {
+      setPreviewLayout(measuredPreview);
+    }
+
+    if (nextGuideLayout) {
+      setGuideLayout(nextGuideLayout);
+    }
+
+    return {
+      preview: nextPreviewLayout,
+      guide: nextGuideLayout,
+    };
+  }
+
   async function cropToGuideArea(photoUri: string) {
+    {
+      const img = await ImageManipulator.manipulateAsync(
+        photoUri,
+        [],
+        { format: ImageManipulator.SaveFormat.JPEG }
+      );
+
+      const layouts = await syncCropLayouts();
+      const currentPreviewLayout = layouts.preview;
+      const currentGuideLayout = layouts.guide;
+
+      if (!currentGuideLayout || !currentPreviewLayout) {
+        return photoUri;
+      }
+
+      const scale = Math.max(
+        currentPreviewLayout.width / img.width,
+        currentPreviewLayout.height / img.height
+      );
+
+      const displayedW = img.width * scale;
+      const displayedH = img.height * scale;
+      const offsetX = (displayedW - currentPreviewLayout.width) / 2;
+      const offsetY = (displayedH - currentPreviewLayout.height) / 2;
+
+      const trimLeft = 0;
+      const trimRight = 0;
+      const trimTop = 0;
+      const trimBottom = 0;
+
+      const cropGuideArea = {
+        x: currentGuideLayout.x + trimLeft,
+        y: currentGuideLayout.y + trimTop,
+        width: currentGuideLayout.width - trimLeft - trimRight,
+        height: currentGuideLayout.height - trimTop - trimBottom,
+      };
+
+      const cropX = Math.round((cropGuideArea.x + offsetX) / scale);
+      const cropY = Math.round((cropGuideArea.y + offsetY) / scale);
+      const cropW = Math.round(cropGuideArea.width / scale);
+      const cropH = Math.round(cropGuideArea.height / scale);
+
+      const safeCropX = Math.max(0, Math.min(cropX, img.width - 1));
+      const safeCropY = Math.max(0, Math.min(cropY, img.height - 1));
+      const safeCropW = Math.max(1, Math.min(cropW, img.width - safeCropX));
+      const safeCropH = Math.max(1, Math.min(cropH, img.height - safeCropY));
+
+      if (ENABLE_CROP_DEBUG) {
+        console.log('[scan-crop]', {
+          image: { width: img.width, height: img.height },
+          preview: currentPreviewLayout,
+          guide: currentGuideLayout,
+          cropGuideArea,
+          scale,
+          offsetX,
+          offsetY,
+          trimTop,
+          trimBottom,
+          trimLeft,
+          trimRight,
+          safeCrop: {
+            x: safeCropX,
+            y: safeCropY,
+            width: safeCropW,
+            height: safeCropH,
+          },
+        });
+      }
+
+      const cropped = await ImageManipulator.manipulateAsync(
+        photoUri,
+        [
+          {
+            crop: {
+              originX: safeCropX,
+              originY: safeCropY,
+              width: safeCropW,
+              height: safeCropH,
+            },
+          },
+        ],
+        { format: ImageManipulator.SaveFormat.JPEG, compress: 0.95 }
+      );
+
+      return cropped.uri;
+    }
+    /*
   const img = await ImageManipulator.manipulateAsync(
     photoUri,
     [],
@@ -197,6 +336,7 @@ const [guideLayout, setGuideLayout] = useState<LayoutBox | null>(null);
   );
 
   return cropped.uri;
+  */
 }
 
   async function handleCapture() {
@@ -346,6 +486,7 @@ const [guideLayout, setGuideLayout] = useState<LayoutBox | null>(null);
 
   return (
     <View
+      ref={previewRef}
       style={styles.container}
       onLayout={(e) => {
         const { x, y, width, height } = e.nativeEvent.layout;
@@ -367,6 +508,7 @@ const [guideLayout, setGuideLayout] = useState<LayoutBox | null>(null);
           <View style={styles.guideRow}>
             <View style={styles.guideMaskSide} />
             <View
+              ref={guideRef}
               style={styles.guide}
               onLayout={(e) => {
                 const { x, y, width, height } = e.nativeEvent.layout;
