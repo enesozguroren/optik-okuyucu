@@ -21,7 +21,6 @@ type ScanState = 'scanning' | 'processing' | 'result' | 'naming';
 interface ResultData {
   bookletType: AnswerChoice;
   adCropUri: string | null;
-  debugImageUri: string | null;
   studentName: string;
   studentNumber: string;
   answers: AnswerChoice[];
@@ -32,7 +31,7 @@ interface ResultData {
 }
 
 const RESULT_DISPLAY_SEC = 5;
-const API_BASE_URL = 'http://192.168.1.61:3000';
+const API_BASE_URL = 'http://192.168.137.1:3000';
 
 const { width: SCREEN_W, height: SCREEN_H } = Dimensions.get('window');
 
@@ -50,7 +49,6 @@ export default function ScanScreen() {
   const [countdown, setCountdown] = useState(RESULT_DISPLAY_SEC);
   const [manualName, setManualName] = useState('');
   const [autoCapture, setAutoCapture] = useState(false);
-  const [showDebug, setShowDebug] = useState(false);
 
   const progressAnim = useRef(new Animated.Value(1)).current;
   const countdownRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -58,9 +56,13 @@ export default function ScanScreen() {
 
   useEffect(() => {
     if (state !== 'scanning' || !autoCapture) return;
+
     const interval = setInterval(() => {
-      if (!processingRef.current) handleCapture();
+      if (!processingRef.current) {
+        handleCapture();
+      }
     }, 1800);
+
     return () => clearInterval(interval);
   }, [state, autoCapture]);
 
@@ -176,7 +178,9 @@ export default function ScanScreen() {
         skipProcessing: false,
       });
 
-      if (!photo) throw new Error('Fotoğraf çekilemedi');
+      if (!photo) {
+        throw new Error('Fotoğraf çekilemedi');
+      }
 
       Vibration.vibrate(50);
 
@@ -203,7 +207,8 @@ export default function ScanScreen() {
         throw new Error(data.error || 'Sunucu hatası');
       }
 
-      const bookletType = (data.bookletType || 'A') as GroupLabel;
+      const bookletType = (data.bookletType || 'A') as AnswerChoice;
+
       const answers = Array.isArray(data.answers)
         ? data.answers.map((a: any) => {
             if (['A', 'B', 'C', 'D', 'E'].includes(a)) return a as AnswerChoice;
@@ -211,9 +216,14 @@ export default function ScanScreen() {
           })
         : [];
 
+      const validGroup: GroupLabel | null =
+  bookletType && ['A', 'B', 'C', 'D', 'E'].includes(bookletType)
+    ? (bookletType as GroupLabel)
+    : null;
+
       const answerKey =
-        activeQuiz.groupCount > 1 && bookletType && activeQuiz.answerKeys[bookletType]
-          ? activeQuiz.answerKeys[bookletType]
+        activeQuiz.groupCount > 1 && validGroup
+          ? activeQuiz.answerKeys[validGroup]
           : activeQuiz.answerKeys.A;
 
       const scoreResult = calculateScore(
@@ -232,14 +242,9 @@ export default function ScanScreen() {
         ? await base64ToFile(data.nameCropBase64, 'name_crop')
         : null;
 
-      const debugImageUri = data.debugImageBase64
-        ? await base64ToFile(data.debugImageBase64, 'debug_crop')
-        : null;
-
       const r: ResultData = {
         bookletType,
         adCropUri,
-        debugImageUri,
         studentName: matchedStudent?.name || '',
         studentNumber,
         answers,
@@ -289,14 +294,12 @@ export default function ScanScreen() {
   function handleNextScan() {
     if (countdownRef.current) clearInterval(countdownRef.current);
     setResult(null);
-    setShowDebug(false);
     setState('scanning');
   }
 
   function handleDeleteResult() {
     if (countdownRef.current) clearInterval(countdownRef.current);
     setResult(null);
-    setShowDebug(false);
     setState('scanning');
   }
 
@@ -403,17 +406,6 @@ export default function ScanScreen() {
               </View>
             )}
 
-            {showDebug && result.debugImageUri && (
-              <View style={styles.cropContainer}>
-                <Text style={styles.cropLabel}>Python Debug</Text>
-                <Image
-                  source={{ uri: result.debugImageUri }}
-                  style={{ width: '100%', height: 180, borderRadius: 8 }}
-                  resizeMode="contain"
-                />
-              </View>
-            )}
-
             <View style={styles.dybRow}>
               <View style={[styles.dybItem, { backgroundColor: '#e8f8ef' }]}>
                 <Text style={[styles.dybNum, { color: '#27ae60' }]}>{result.correct}</Text>
@@ -433,17 +425,6 @@ export default function ScanScreen() {
               <TouchableOpacity style={styles.deleteResultBtn} onPress={handleDeleteResult}>
                 <Text style={styles.deleteResultText}>Sil</Text>
               </TouchableOpacity>
-
-              {result.debugImageUri && (
-                <TouchableOpacity
-                  style={styles.debugBtn}
-                  onPress={() => setShowDebug(prev => !prev)}
-                >
-                  <Text style={styles.debugBtnText}>
-                    {showDebug ? 'Debug Gizle' : 'Debug Göster'}
-                  </Text>
-                </TouchableOpacity>
-              )}
 
               <TouchableOpacity style={styles.nextBtn} onPress={handleNextScan}>
                 <Text style={styles.nextBtnText}>Sonraki ({countdown})</Text>
@@ -552,7 +533,12 @@ const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#000' },
   center: { flex: 1, justifyContent: 'center', alignItems: 'center', gap: 16 },
   permText: { fontSize: 16, color: '#333' },
-  permBtn: { backgroundColor: '#4472C4', borderRadius: 10, paddingHorizontal: 24, paddingVertical: 12 },
+  permBtn: {
+    backgroundColor: '#4472C4',
+    borderRadius: 10,
+    paddingHorizontal: 24,
+    paddingVertical: 12,
+  },
   permBtnText: { color: '#fff', fontWeight: '600' },
 
   processingOverlay: {
@@ -649,7 +635,12 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     paddingHorizontal: 16,
   },
-  progressBg: { height: 4, backgroundColor: 'rgba(255,255,255,0.2)', borderRadius: 2, marginBottom: 16 },
+  progressBg: {
+    height: 4,
+    backgroundColor: 'rgba(255,255,255,0.2)',
+    borderRadius: 2,
+    marginBottom: 16,
+  },
   progressBar: { height: 4, backgroundColor: '#4472C4', borderRadius: 2 },
 
   resultCard: {
@@ -660,6 +651,7 @@ const styles = StyleSheet.create({
   resultQuizName: { fontSize: 13, color: '#888', marginBottom: 4, textAlign: 'center' },
   resultScore: { fontSize: 56, fontWeight: '700', textAlign: 'center', lineHeight: 64 },
   resultScoreLabel: { fontSize: 14, color: '#555', textAlign: 'center', marginBottom: 16 },
+
   resultInfoRow: { flexDirection: 'row', gap: 12, marginBottom: 12 },
   resultInfoItem: {
     flex: 1,
@@ -687,7 +679,7 @@ const styles = StyleSheet.create({
   dybNum: { fontSize: 22, fontWeight: '700' },
   dybLabel: { fontSize: 11, color: '#555', marginTop: 2 },
 
-  resultActions: { flexDirection: 'row', gap: 10, alignItems: 'center' },
+  resultActions: { flexDirection: 'row', gap: 10 },
   deleteResultBtn: {
     paddingVertical: 12,
     paddingHorizontal: 18,
@@ -697,13 +689,6 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   deleteResultText: { color: '#e74c3c', fontWeight: '600' },
-  debugBtn: {
-    paddingVertical: 12,
-    paddingHorizontal: 14,
-    borderRadius: 8,
-    backgroundColor: '#eef2ff',
-  },
-  debugBtnText: { color: '#4472C4', fontWeight: '600' },
   nextBtn: {
     flex: 1,
     backgroundColor: '#4472C4',
@@ -760,6 +745,7 @@ const styles = StyleSheet.create({
   },
   modalTitle: { fontSize: 18, fontWeight: '700', color: '#1a1a1a', marginBottom: 12 },
   modalSub: { fontSize: 13, color: '#555', marginBottom: 12 },
+
   modalInfoRow: { flexDirection: 'row', alignItems: 'center', gap: 10, marginBottom: 10 },
   modalInfoLabel: { fontSize: 12, color: '#888', fontWeight: '600' },
   modalBookletBadge: {
@@ -769,6 +755,7 @@ const styles = StyleSheet.create({
     paddingVertical: 4,
   },
   modalBookletText: { fontSize: 18, fontWeight: '800', color: '#4472C4' },
+
   modalCropContainer: {
     marginBottom: 10,
     backgroundColor: '#f8f9ff',

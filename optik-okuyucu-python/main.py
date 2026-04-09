@@ -392,8 +392,6 @@ async def upload_image(photo: UploadFile = File(...)):
             "multiMark": hatalilar,
             "markerCount": 4,
             "nameCropBase64": name_crop_b64,
-            "debugImageBase64": debug_b64,
-            "warpedImageBase64": warped_b64
         }
 
     except Exception as e:
